@@ -21,3 +21,4 @@ screenshot.png
 # oh-my-claudecode 세션 state
 .omc/
 .claude/
+.vercel

@@ -65,7 +65,12 @@ def fetch_values() -> list[list[str]]:
 
 
 def parse(values: list[list[str]]) -> dict:
-    """1행(그룹 헤더) + 2행(컬럼 헤더) + 데이터 + 환율 행 분리, 빈 행 기준 그룹화."""
+    """1행(그룹 헤더) + 2행(컬럼 헤더) + 데이터 + 환율 행 분리, 빈 행 기준 그룹화.
+
+    A열 첫 셀이 `[...]` 형태(예: "[2025·26·27년 영업이익 출처/근거]")인 그룹을 만나면,
+    그 라벨 그룹 자체와 이후의 모든 그룹을 **참고 섹션**으로 분리한다.
+    (메인 PER 표는 이 라벨 이전의 그룹만으로 구성한다.)
+    """
     header_top = values[0]
     header_mid = values[1]
 
@@ -77,17 +82,36 @@ def parse(values: list[list[str]]) -> dict:
             continue
         cleaned.append(row)
 
-    groups: list[list[list[str]]] = []
+    all_groups: list[list[list[str]]] = []
     current: list[list[str]] = []
     for row in cleaned:
         if not any(c.strip() for c in row):
             if current:
-                groups.append(current)
+                all_groups.append(current)
                 current = []
             continue
         current.append(row)
     if current:
-        groups.append(current)
+        all_groups.append(current)
+
+    # `[...]` 라벨 그룹을 경계로 메인/참고 분리
+    main_groups: list[list[list[str]]] = []
+    reference_label = ""
+    reference_groups: list[list[list[str]]] = []
+    boundary_hit = False
+    for grp in all_groups:
+        first_cell = grp[0][0].strip() if grp and grp[0] else ""
+        if not boundary_hit and first_cell.startswith("[") and first_cell.endswith("]"):
+            boundary_hit = True
+            reference_label = first_cell
+            # 라벨만 들어있는 단독 그룹이면 reference_groups 에 포함하지 않는다.
+            if len(grp) > 1:
+                reference_groups.append(grp[1:])
+            continue
+        if boundary_hit:
+            reference_groups.append(grp)
+        else:
+            main_groups.append(grp)
 
     # 환율 추출 (D열, index 3)
     exchange_rate = ""
@@ -97,7 +121,9 @@ def parse(values: list[list[str]]) -> dict:
     return {
         "header_top": header_top,
         "header_mid": header_mid,
-        "groups": groups,
+        "groups": main_groups,
+        "reference_label": reference_label,
+        "reference_groups": reference_groups,
         "exchange_rate": exchange_rate,
     }
 
@@ -283,6 +309,58 @@ HTML_TEMPLATE = """<!doctype html>
     color: var(--muted);
     font-size: 12px;
   }}
+
+  /* 참고/근거 섹션 */
+  section.reference {{
+    margin-top: 28px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px 22px;
+  }}
+  section.reference h2 {{
+    margin: 0 0 14px;
+    font-size: 15px;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }}
+  .ref-block + .ref-block {{ margin-top: 18px; }}
+  .ref-table {{
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    font-size: 12.5px;
+  }}
+  .ref-table th, .ref-table td {{
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    text-align: left;
+    white-space: normal;
+    line-height: 1.45;
+  }}
+  .ref-table th {{
+    background: var(--panel-2);
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+  }}
+  .ref-table td.first, .ref-table th.first {{
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    width: 1%;
+    padding-right: 16px;
+  }}
+  .ref-notes {{
+    margin: 0;
+    padding-left: 18px;
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.6;
+  }}
+  .ref-notes li {{ margin-bottom: 4px; }}
 </style>
 </head>
 <body>
@@ -304,6 +382,8 @@ HTML_TEMPLATE = """<!doctype html>
       <table id="per-table"></table>
     </div>
 
+    <section id="reference-host"></section>
+
     <div class="footer">
       그룹은 원본 시트의 빈 행 구분을 그대로 따른다.
       셀이 비어 있는 종목은 해당 데이터가 시트에 입력되어 있지 않은 경우다.
@@ -321,7 +401,7 @@ const COL_GROUPS = [
   {{ label: "PER",            start: 6,  end: 8 }},
   {{ label: "분기 실적 발표", start: 9,  end: 13 }},
   {{ label: "다음분기 가이던스", start: 14, end: 17 }},
-  {{ label: "영업이익(연간)", start: 18, end: 19 }},
+  {{ label: "영업이익(연간)", start: 18, end: 20 }},
 ];
 
 const COL_COUNT = DATA.header_mid.length;
@@ -430,11 +510,72 @@ function buildBody() {{
   return tbody;
 }}
 
+function buildReference() {{
+  const host = document.getElementById("reference-host");
+  host.innerHTML = "";
+  const groups = DATA.reference_groups || [];
+  if (!DATA.reference_label && groups.length === 0) {{
+    host.style.display = "none";
+    return;
+  }}
+  host.style.display = "";
+  host.className = "reference";
+
+  const h2 = document.createElement("h2");
+  h2.textContent = DATA.reference_label || "참고";
+  host.appendChild(h2);
+
+  groups.forEach(grp => {{
+    const block = document.createElement("div");
+    block.className = "ref-block";
+
+    // 의미 있는 컬럼 수 (가장 오른쪽 비어있지 않은 셀 + 1)
+    const maxCols = grp.reduce((acc, row) => {{
+      let last = 0;
+      for (let i = 0; i < row.length; i++) {{
+        if ((row[i] || "").trim()) last = i + 1;
+      }}
+      return Math.max(acc, last);
+    }}, 0);
+
+    if (maxCols <= 1) {{
+      // 각주처럼 한 셀짜리 행들 → 리스트
+      const ul = document.createElement("ul");
+      ul.className = "ref-notes";
+      grp.forEach(row => {{
+        const li = document.createElement("li");
+        li.textContent = (row[0] || "").replace(/^\\*\\s*/, "");
+        ul.appendChild(li);
+      }});
+      block.appendChild(ul);
+    }} else {{
+      // 다중 컬럼 → 표. 첫 행은 헤더로.
+      const table = document.createElement("table");
+      table.className = "ref-table";
+      const tbody = document.createElement("tbody");
+      grp.forEach((row, ri) => {{
+        const tr = document.createElement("tr");
+        for (let i = 0; i < maxCols; i++) {{
+          const cell = document.createElement(ri === 0 ? "th" : "td");
+          cell.textContent = row[i] || "";
+          if (i === 0) cell.classList.add("first");
+          tr.appendChild(cell);
+        }}
+        tbody.appendChild(tr);
+      }});
+      table.appendChild(tbody);
+      block.appendChild(table);
+    }}
+    host.appendChild(block);
+  }});
+}}
+
 function render() {{
   const table = document.getElementById("per-table");
   table.innerHTML = "";
   table.appendChild(buildHead());
   table.appendChild(buildBody());
+  buildReference();
 }}
 
 render();
