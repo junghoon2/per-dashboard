@@ -1,0 +1,23 @@
+# 환경 변수 (시트 ID 등 민감 식별자)
+.env
+.env.local
+*.env
+
+# Python 빌드 산출물
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 임시 산출물
+screenshot.png
+
+# OS
+.DS_Store
+
+# Vercel
+.vercel/
+
+# oh-my-claudecode 세션 state
+.omc/
+.claude/
